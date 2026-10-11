@@ -1,0 +1,116 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <LittleFS.h>
+#define RX2_PIN 17
+#define TX2_PIN 16
+HardwareSerial hwSerial(2);
+
+const char* ssid = "你的WiFi名称";
+const char* password = "你的WiFi密码";
+
+String rxBuffer;
+bool receivingBinary = false;
+String currentFileName;
+
+void setup() {
+  Serial.begin(115200);
+  hwSerial.begin(115200, SERIAL_8N1, RX2_PIN, TX2_PIN);
+  if(!LittleFS.begin()){
+    Serial.println("LittleFS 挂载失败");
+  }else{
+    Serial.println("LittleFS就绪");
+  }
+  // 连接WiFi
+  WiFi.begin(ssid, password);
+  while(WiFi.status() != WL_CONNECTED){
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi连接成功");
+}
+
+void loop() {
+  while(hwSerial.available()){
+    char c = hwSerial.read();
+    if(c == '\n'){
+      processCommand(rxBuffer);
+      rxBuffer = "";
+    }else{
+      rxBuffer += c;
+    }
+  }
+}
+
+void processCommand(String cmd){
+  Serial.println("收到指令: " + cmd);
+  if(cmd.startsWith("LIST")){
+    // 列出全部文件，发给UNO文件管理器
+    Dir dir = LittleFS.openDir("/");
+    while(dir.next()){
+      hwSerial.print(dir.fileName());
+      hwSerial.print('\n');
+    }
+    hwSerial.print("END_LIST\n");
+  }
+  else if(cmd.startsWith("SAVE:")){
+    // SAVE:文件名，准备接收二进制数据
+    currentFileName = cmd.substring(5);
+    receivingBinary = true;
+    hwSerial.print("READY_RECV\n");
+  }
+  else if(cmd.startsWith("LOAD:")){
+    // LOAD:文件名，读取文件回传UNO
+    String fname = cmd.substring(5);
+    File f = LittleFS.open("/"+fname, "r");
+    if(!f){
+      hwSerial.print("FILE_ERR\n");
+      return;
+    }
+    hwSerial.print("FILE_OK\n");
+    uint8_t buf[128];
+    while(f.available()){
+      size_t readLen = f.readBytes(buf, 128);
+      hwSerial.write(buf, readLen);
+    }
+    f.close();
+    hwSerial.print("END_FILE\n");
+  }
+  else if(cmd.startsWith("HTTP:")){
+    // HTTP:网址，网页浏览器功能
+    String url = cmd.substring(5);
+    httpFetch(url);
+  }
+  else if(cmd.startsWith("DEL:")){
+    // DEL:文件名 删除文件
+    String fname = cmd.substring(4);
+    if(LittleFS.remove("/"+fname)){
+      hwSerial.print("DEL_OK\n");
+    }else{
+      hwSerial.print("DEL_ERR\n");
+    }
+  }
+  else if(cmd == "BIN_END"){
+    // 二进制数据接收完毕，保存文件
+    receivingBinary = false;
+    File f = LittleFS.open("/"+currentFileName, "w");
+    f.write((uint8_t*)rxBuffer.c_str(), rxBuffer.length());
+    f.close();
+    hwSerial.print("SAVE_OK\n");
+    rxBuffer = "";
+  }
+}
+
+void httpFetch(String url){
+  HTTPClient http;
+  http.begin(url);
+  int httpCode = http.GET();
+  if(httpCode > 0){
+    String payload = http.getString();
+    hwSerial.print("HTTP_OK\n");
+    hwSerial.print(payload);
+    hwSerial.print("\nEND_HTTP\n");
+  }else{
+    hwSerial.print("HTTP_ERR\n");
+  }
+  http.end();
+}
