@@ -1,0 +1,189 @@
+#include <MCUFRIEND_kbv.h>
+#include <SoftwareSerial.h>
+#include <USB.h>
+#include <USBHost.h>
+#include <hidboot.h>
+
+#define LCD_CS A3
+#define LCD_CD A2
+#define LCD_WR A1
+#define LCD_RD A0
+#define LCD_RESET A4
+
+// UNO软串口和ESP32通信
+SoftwareSerial espSerial(11, 10); // RX=11, TX=10
+
+MCUFRIEND_kbv tft;
+
+// 颜色
+#define BLACK     0x0000
+#define WHITE     0xFFFF
+#define BLUE      0x001F
+#define RED       0xF800
+#define GREEN     0x07E0
+#define GRAY      0x8410
+
+// USB鼠标
+HIDBoot<USBHIDMouse> Mouse;
+int mouseX = 160, mouseY = 120;
+int prevX, prevY;
+bool mouseDown = false;
+
+// APP状态
+enum APP {APP_DRAW, APP_NOTE, APP_FILE, APP_GALLERY, APP_BROWSER};
+APP currentApp = APP_DRAW;
+
+String noteText = "";
+const char keys[] = "abcdefghijklmnopqrstuvwxyz";
+String fileList = "";
+String httpResult = "";
+
+void setup() {
+  Serial.begin(115200);
+  espSerial.begin(115200);
+  uint16_t ID = tft.readID();
+  tft.begin(ID);
+  tft.setRotation(0);
+  tft.fillScreen(BLACK);
+  USB.Init();
+  drawDesktop();
+}
+
+void loop() {
+  USB.Task();
+  pollMouse();
+  handleESP32Msg();
+  switch(currentApp){
+    case APP_DRAW: drawApp(); break;
+    case APP_NOTE: noteApp(); break;
+    case APP_FILE: fileManagerApp(); break;
+    case APP_GALLERY: galleryApp(); break;
+    case APP_BROWSER: browserApp(); break;
+  }
+}
+
+void pollMouse(){
+  if(Mouse.available()){
+    Mouse.read();
+    int dx = Mouse.getX();
+    int dy = Mouse.getY();
+    bool btn = Mouse.getButton(0);
+    prevX = mouseX;
+    prevY = mouseY;
+    mouseX = constrain(mouseX + dx,0,319);
+    mouseY = constrain(mouseY + dy,0,239);
+    if(btn && mouseDown){
+      tft.drawLine(prevX,prevY,mouseX,mouseY,WHITE);
+    }
+    mouseDown = btn;
+    drawCursor();
+  }
+}
+
+void drawCursor(){
+  tft.drawPixel(prevX,prevY,BLACK);
+  tft.drawPixel(mouseX,mouseY,RED);
+}
+
+void drawDesktop(){
+  tft.fillScreen(BLACK);
+  tft.setTextColor(WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(10,10); tft.print("1:Draw");
+  tft.setCursor(10,40); tft.print("2:Note");
+  tft.setCursor(10,70); tft.print("3:File");
+  tft.setCursor(10,100);tft.print("4:Gallery");
+  tft.setCursor(10,130);tft.print("5:Browser");
+}
+
+void drawApp(){
+  static bool init = false;
+  if(!init){ tft.fillScreen(BLACK); init=true; }
+  // 清屏按钮
+  if(checkClick(240,0,320,30)){ tft.fillScreen(BLACK; }
+  // 保存画布到ESP32
+  if(checkClick(240,40,320,70)){ saveCanvasToESP32(); }
+  tft.fillRect(240,0,80,30,GRAY); tft.setTextColor(WHITE);tft.setCursor(245,5);tft.print("CLS");
+  tft.fillRect(240,40,80,30,GRAY); tft.setCursor(245,45);tft.print("SAVE");
+}
+
+void saveCanvasToESP32(){
+  espSerial.println("SAVE:canvas.raw");
+  delay(100);
+  // 简化演示：实际完整版需要把屏幕像素打包发送
+  espSerial.println("BIN_END");
+}
+
+void noteApp(){
+  static bool init=false;
+  if(!init){tft.fillScreen(BLACK);init=true;}
+  tft.setTextColor(WHITE);
+  tft.setCursor(0,0); tft.print(noteText);
+  // 小写英文键盘
+  for(int i=0;i<26;i++){
+    int x = (i%13)*22; int y = 180 + (i/13)*25;
+    tft.drawRect(x,y,20,20,GRAY);
+    tft.setCursor(x+4,y+4); tft.print(keys[i]);
+    if(checkClick(x,y,x+20,y+20)){
+      noteText += keys[i];
+    }
+  }
+  // 保存笔记按钮
+  if(checkClick(240, 180, 320,220)){
+    espSerial.println("SAVE:note.txt");
+    delay(100);
+    espSerial.print(noteText);
+    espSerial.println("BIN_END");
+  }
+  tft.fillRect(240,180,80,40,GRAY); tft.setCursor(245,190);tft.print("SAVE");
+}
+
+void fileManagerApp(){
+  static bool init=false;
+  if(!init){
+    tft.fillScreen(BLACK);
+    init=true;
+    espSerial.println("LIST"); // 请求ESP32列出文件
+    fileList = "";
+  }
+  tft.setTextColor(WHITE);
+  tft.setCursor(0,0);
+  tft.print(fileList);
+}
+
+void galleryApp(){
+  static bool init=false;
+  if(!init){tft.fillScreen(BLACK);init=true;}
+  tft.setTextColor(WHITE);
+  tft.setCursor(0,0);
+  tft.print("Gallery: load raw img from ESP32");
+}
+
+void browserApp(){
+  static bool init=false;
+  if(!init){tft.fillScreen(BLACK);init=true;}
+  tft.setTextColor(WHITE);
+  tft.setCursor(0,0);
+  tft.print("Send URL to ESP32");
+  tft.setCursor(0,20);
+  tft.print(httpResult.substring(0,200));
+}
+
+bool checkClick(int x1,int y1,int x2,int y2){
+  return (mouseX >=x1 && mouseX <=x2 && mouseY >=y1 && mouseY <=y2 && mouseDown);
+}
+
+void handleESP32Msg(){
+  while(espSerial.available()){
+    char c = espSerial.read();
+    Serial.write(c);
+    // 接收ESP32返回信息，填充文件列表、网页内容
+    if(currentApp == APP_FILE){
+      fileList += c;
+    }
+    if(currentApp == APP_BROWSER){
+      httpResult += c;
+    }
+  }
+}
+s
